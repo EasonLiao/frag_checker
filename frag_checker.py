@@ -11,7 +11,6 @@ import subprocess
 import tempfile
 
 parser = argparse.ArgumentParser(description="Fragmentation checker")
-parser.add_argument("--device", "-d", type=str, required=True, help="The device containting the file system.")
 parser.add_argument("--dir", type=str, help="The directory you want to check.")
 parser.add_argument("--file", "-f", type=str, help="The file you want to check.")
 # parser.add_argument("--verbose", "-v", type=str, help="Not only print number of contiguous blocks but also detailed information.")
@@ -21,34 +20,44 @@ args = parser.parse_args()
 n_pattern = re.compile("(.*): (\d+) contiguous extents")
 black_hole = open(os.devnull, 'w')
 
-def get_num_contiguous_blocks(path):
+def find_mount_info(path):
+  assert os.path.exists(path), "Path not exist!"
+  out = check_output(["df", path])
+  lines = out.split('\n')[1]
+  cols = lines.split()
+  device, mount_point = cols[0], cols[5]
+  return device, mount_point
+
+def get_num_contiguous_blocks(dev_name, rel_path):
     # Return number of contiguous blocks for a given path.
-    output = check_output(["debugfs", args.device, "-R", "filefrag %s" % path], stderr=black_hole)
+    output = check_output(["debugfs", dev_name, "-R", "filefrag %s" % rel_path], stderr=black_hole)
     mo = re.match(n_pattern, output)
     assert mo is not None, "Failed to match output of debugfs."
     n_blocks = mo.group(2)
     return int(n_blocks)
 
-def generate_code(f, path, all_files):
-    f.write("cd %s\n" % path)
+def generate_code(f, rel_path, all_files):
+    f.write("cd %s\n" % rel_path)
     for f_path in all_files:
         f.write("filefrag %s\n" % f_path)
     f.write("quit\n")
     # Must flush!
     f.flush()
 
-def walk_directory(path):
+def walk_directory(dev_name, rel_path, mount_point):
     all_files = []
-    for item in os.listdir(path):
-        if os.path.isfile(os.path.join(path, item)):
+    dir_path = os.path.join(mount_point, rel_path)
+    # List all the files under dir_path.
+    for item in os.listdir(dir_path):
+        if os.path.isfile(os.path.join(dir_path, item)):
             all_files.append(item)
 
     # Create a temporary file to store generated code for debugfs.
     code_file = tempfile.NamedTemporaryFile(delete=False)
-    generate_code(code_file, path, all_files)
+    generate_code(code_file, rel_path, all_files)
 
     # Execute debugfs with generated code.
-    cmds = ["debugfs", "-f", code_file.name, args.device]
+    cmds = ["debugfs", "-f", code_file.name, dev_name]
     output = check_output(cmds, stderr=black_hole)
 
     # Break output of debugfs into lines.
@@ -77,12 +86,16 @@ def main():
     if args.dir != None:
         # Convert relpath to abspath.
         path = os.path.abspath(args.dir)
-        results = walk_directory(path)
+        dev_name, mount_point = find_mount_info(path)
+        rel_path = os.path.relpath(path, start=mount_point)
+        results = walk_directory(dev_name, rel_path, mount_point)
         show_results(results)
     else:
         # Convert relpath to abspath.
         path = os.path.abspath(args.file)
-        results = [(path, get_num_contiguous_blocks(path))]
+        dev_name, mount_point = find_mount_info(path)
+        rel_path = os.path.relpath(path, start=mount_point)
+        results = [(path, get_num_contiguous_blocks(dev_name, rel_path))]
         show_results(results)
 
 if __name__ == "__main__":
